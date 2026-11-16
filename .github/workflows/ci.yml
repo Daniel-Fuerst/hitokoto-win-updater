@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  QT_VERSION_LINUX: "6.12.0"
+  QT_VERSION_WINDOWS: "6.8.3"
+
+jobs:
+  format:
+    name: Format (clang-format)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check formatting
+        run: clang-format-18 --dry-run --Werror $(git ls-files '*.cpp' '*.hpp')
+
+  core-sanitizers:
+    name: Core with ASan/UBSan, without Qt (layering check)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure
+        run: cmake --preset core-sanitize
+      - name: Build
+        run: cmake --build --preset core-sanitize --parallel
+      - name: Test
+        run: ctest --preset core-sanitize
+
+  build-test:
+    name: Build and test (Windows)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION_WINDOWS }}
+          arch: win64_msvc2022_64
+          cache: true
+      - name: Configure
+        run: cmake --preset ci -DUPDATER_WARNINGS_AS_ERRORS=OFF
+      - name: Build
+        run: cmake --build --preset ci --parallel
+      - name: Test
+        run: ctest --preset ci
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+  tidy:
+    name: Lint (clang-tidy)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Linux packages
+        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev libegl1 clang-tidy-18
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION_LINUX }}
+          arch: linux_gcc_64
+          cache: true
+      - name: Configure
+        run: cmake --preset dev
+      - name: Build (generates moc files)
+        run: cmake --build --preset dev --parallel
+      - name: clang-tidy
+        run: run-clang-tidy-18 -p build/dev -quiet "$(pwd)/(src|tests)/"
