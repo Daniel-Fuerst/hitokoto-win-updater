@@ -1,0 +1,120 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  QT_VERSION_LINUX: "6.12.0"
+  QT_VERSION_WINDOWS: "6.8.3"
+
+jobs:
+  format:
+    name: Format (clang-format)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check formatting
+        run: |
+          files=$(git ls-files '*.cpp' '*.hpp')
+          if [ -z "$files" ]; then
+            echo "No C++ files tracked yet; skipping."
+            exit 0
+          fi
+          clang-format-18 --dry-run --Werror $files
+
+  core-sanitizers:
+    name: Core with ASan/UBSan, without Qt (layering check)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check project
+        id: project
+        run: |
+          if [ -f CMakePresets.json ]; then
+            echo "has_cmake=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_cmake=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Configure
+        if: steps.project.outputs.has_cmake == 'true'
+        run: cmake --preset core-sanitize
+      - name: Build
+        if: steps.project.outputs.has_cmake == 'true'
+        run: cmake --build --preset core-sanitize --parallel
+      - name: Test
+        if: steps.project.outputs.has_cmake == 'true'
+        run: ctest --preset core-sanitize
+
+  build-test:
+    name: Build and test (Windows)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check project
+        id: project
+        shell: pwsh
+        run: |
+          if (Test-Path CMakePresets.json) {
+            "has_cmake=true" >> $env:GITHUB_OUTPUT
+          } else {
+            "has_cmake=false" >> $env:GITHUB_OUTPUT
+          }
+      - name: Install Qt
+        if: steps.project.outputs.has_cmake == 'true'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION_WINDOWS }}
+          arch: win64_msvc2022_64
+          cache: true
+      - name: Configure
+        if: steps.project.outputs.has_cmake == 'true'
+        run: cmake --preset ci -DUPDATER_WARNINGS_AS_ERRORS=OFF
+      - name: Build
+        if: steps.project.outputs.has_cmake == 'true'
+        run: cmake --build --preset ci --parallel
+      - name: Test
+        if: steps.project.outputs.has_cmake == 'true'
+        run: ctest --preset ci
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+  tidy:
+    name: Lint (clang-tidy)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check project
+        id: project
+        run: |
+          if [ -f CMakePresets.json ]; then
+            echo "has_cmake=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_cmake=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Linux packages
+        if: steps.project.outputs.has_cmake == 'true'
+        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev libegl1 clang-tidy-18
+      - name: Install Qt
+        if: steps.project.outputs.has_cmake == 'true'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION_LINUX }}
+          arch: linux_gcc_64
+          cache: true
+      - name: Configure
+        if: steps.project.outputs.has_cmake == 'true'
+        run: cmake --preset dev
+      - name: Build (generates moc files)
+        if: steps.project.outputs.has_cmake == 'true'
+        run: cmake --build --preset dev --parallel
+      - name: clang-tidy
+        if: steps.project.outputs.has_cmake == 'true'
+        run: run-clang-tidy-18 -p build/dev -quiet "$(pwd)/(src|tests)/"

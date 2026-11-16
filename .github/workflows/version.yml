@@ -1,0 +1,193 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: Version and Release
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, edited, labeled, unlabeled, synchronize]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  label:
+    name: Version label
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    concurrency:
+      group: version-label-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check the version label
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          jq -r '.[]' <<< "$LABELS" > "$RUNNER_TEMP/labels.txt"
+          cmake -DMODE=labels -DLABELS_FILE="$RUNNER_TEMP/labels.txt" -P scripts/version/NextVersion.cmake
+
+  tag:
+    name: Tag
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: read
+    outputs:
+      new_version: ${{ steps.tag_merges.outputs.new_version }}
+      version: ${{ steps.tag_merges.outputs.version }}
+    concurrency:
+      group: version-tag
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Tag the merges into main
+        id: tag_merges
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/version"
+          mkdir -p "$work"
+          script=scripts/version/NextVersion.cmake
+
+          git tag --merged HEAD > "$work/tags.txt"
+          cmake -DMODE=base -DTAGS_FILE="$work/tags.txt" -DOUTPUT="$work/base.txt" -P "$script"
+          base=$(cat "$work/base.txt")
+
+          confirm='select(.base.ref == "main" and .merge_commit_sha == env.SHA and .merged_at != null)
+                   | "pr \(.number)", ("label " + .labels[].name)'
+          : > "$work/candidates.txt"
+          for sha in $(git rev-list --first-parent --reverse "$base..HEAD"); do
+            echo "commit $sha" >> "$work/candidates.txt"
+            parents=$(git rev-list --parents -n 1 "$sha" | wc -w)
+            if [ "$parents" -gt 2 ]; then
+              echo "merge" >> "$work/candidates.txt"
+            fi
+            found=$(SHA="$sha" gh api --paginate "repos/$REPO/commits/$sha/pulls" --jq ".[] | $confirm")
+            if [ -z "$found" ] && [ "$parents" -gt 2 ]; then
+              number=$(git log -1 --format=%s "$sha" \
+                | sed -n -e 's/^Merge pull request #\([0-9][0-9]*\) .*/\1/p' -e 's/.*(#\([0-9][0-9]*\))$/\1/p' \
+                | head -n 1)
+              if [ -n "$number" ]; then
+                found=$(SHA="$sha" gh api "repos/$REPO/pulls/$number" --jq "$confirm" || true)
+              fi
+            fi
+            if [ -n "$found" ]; then
+              echo "$found" >> "$work/candidates.txt"
+            fi
+          done
+
+          status=0
+          cmake -DMODE=plan -DTAGS_FILE="$work/tags.txt" -DCANDIDATES_FILE="$work/candidates.txt" \
+                -DOUTPUT="$work/plan.txt" -P "$script" || status=$?
+          tagged=false
+          last_version=""
+          while read -r sha tag pr; do
+            git -c user.name="github-actions[bot]" \
+                -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                tag -a "$tag" -m "hitokoto-win-updater ${tag#v} (pull request #$pr)" "$sha"
+            git push origin "refs/tags/$tag"
+            echo "- $tag on $sha (pull request #$pr)" >> "$GITHUB_STEP_SUMMARY"
+            tagged=true
+            last_version="${tag#v}"
+          done < "$work/plan.txt"
+          echo "new_version=$tagged" >> "$GITHUB_OUTPUT"
+          echo "version=$last_version" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+  release:
+    name: Windows Release
+    needs: tag
+    if: github.event_name != 'pull_request' && needs.tag.outputs.new_version == 'true'
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: v${{ needs.tag.outputs.version }}
+          fetch-depth: 0
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          arch: win64_msvc2022_64
+          cache: true
+      - name: Build and test
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -S . -B build/release -G 'Visual Studio 17 2022' -A x64 `
+              "-DUPDATER_VERSION=$env:VERSION" `
+              -DUPDATER_BUILD_TESTS=ON `
+              -DUPDATER_WARNINGS_AS_ERRORS=OFF
+          cmake --build build/release --config Release --parallel
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          ctest --test-dir build/release -C Release --output-on-failure
+          Remove-Item Env:QT_QPA_PLATFORM
+      - name: Package Windows zip
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = Join-Path $env:RUNNER_TEMP 'stage'
+          $dist = Join-Path $env:RUNNER_TEMP 'dist'
+          if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+          if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+
+          cmake --install build/release --config Release --prefix $stage
+          $bin = Join-Path $stage 'bin'
+          $exe = Join-Path $bin 'hitokoto-win-updater-cli.exe'
+
+          & (Join-Path $env:QT_ROOT_DIR 'bin\windeployqt.exe') --release --no-translations `
+              --no-compiler-runtime --no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler `
+              $exe
+
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+              -property installationPath
+          $redistVersion = (Get-Content (Join-Path $vs 'VC\Auxiliary\Build\Microsoft.VCRedistVersion.default.txt')).Trim()
+          $crt = Join-Path $vs "VC\Redist\MSVC\$redistVersion\x64\Microsoft.VC143.CRT"
+          Copy-Item (Join-Path $crt '*.dll') $bin
+          Copy-Item 'LICENSE' (Join-Path $bin 'LICENSE.txt')
+
+          # Verify the deployed binary starts without Qt on PATH.
+          $savedPath = $env:PATH
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          $verOut = & $exe --version
+          $env:PATH = $savedPath
+          if ($LASTEXITCODE -ne 0) { throw "deployed binary failed --version" }
+          Write-Host "Deployed binary output: $verOut"
+
+          $zipName = "hitokoto-win-updater-$env:VERSION-win64.zip"
+          $zipPath = Join-Path $dist $zipName
+          Compress-Archive -Path (Join-Path $bin '*') -DestinationPath $zipPath
+
+          $hash = (Get-FileHash -Algorithm SHA256 $zipPath).Hash.ToLowerInvariant()
+          Set-Content -Encoding ascii -Path (Join-Path $dist 'SHA256SUMS') -Value "$hash  $zipName"
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dist = Join-Path $env:RUNNER_TEMP 'dist'
+          $zipPath = Join-Path $dist "hitokoto-win-updater-$env:VERSION-win64.zip"
+          $sumsPath = Join-Path $dist 'SHA256SUMS'
+          gh release create "v$env:VERSION" --verify-tag `
+              --title "hitokoto-win-updater $env:VERSION" `
+              --generate-notes $zipPath $sumsPath
