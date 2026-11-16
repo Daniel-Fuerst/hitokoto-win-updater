@@ -1,6 +1,6 @@
 # Story backlog
 
-- **Status:** Initialised
+- **Status:** Active
 - **Date:** 2026-11-16
 - **Basis:** `docs/adr/0001-technology-stack.md` (C++20, Qt 6 Widgets, CMake)
 
@@ -9,7 +9,8 @@ stories are implemented test-first. Tests reference the story ID (see "Conventio
 
 | Order | ID | Story | Depends on | Size | Status |
 |---|---|---|---|---|---|
-| 1 | `S000` | Repository skeleton, build and CI | – | M | Open |
+| 1 | [S000](000-repository-skeleton.md) | Repository skeleton, build and CI | – | M | In review |
+| 2 | [S001](001-cli-updater.md) | CLI update checker and MSI installer | S000 | M | In review |
 
 Sizes: S = up to a day, M = a few days, L = about a week of part-time work (rough).
 
@@ -32,7 +33,7 @@ checks pass) → **Done** (the user has accepted the functionality; only the use
   noticed; a refined entry becomes a story and leaves that file.
 - Scope changes: `docs/brief.md` (if present) stays the user's brief. Extensions become new stories
   here, with their reason.
-- Core tests (GoogleTest): test suite named after the story, e.g. `TEST(S001_CheckUpdate, ...)`.
+- Core tests (GoogleTest): test suite named after the story, e.g. `TEST(S001_Version, ...)`.
 - UI tests (Qt Test, `QT_QPA_PLATFORM=offscreen`): one test class per story, e.g. `tst_s001_...`.
 - A story is ready for review when its scenarios pass on CI, nothing regressed, and formatting/linting
   checks pass. It is done when the user has accepted it.

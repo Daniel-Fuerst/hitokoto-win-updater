@@ -15,4 +15,4 @@ Checks: >
   readability-container-size-empty,
   misc-unused-using-decls
 WarningsAsErrors: '*'
-HeaderFilterRegex: '.*/(src|tests)/.*'
+HeaderFilterRegex: '(^|/)hitokoto-win-updater/(src|tests)/.*'
