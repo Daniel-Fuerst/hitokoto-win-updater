@@ -64,11 +64,15 @@ public:
     mutable std::filesystem::path last_msi_path;
     mutable MsiInstallOptions last_options{};
     InstallResult result{.launched = true, .exit_code = 0, .error = {}};
+    std::function<void()> on_install;
 
     InstallResult install(const std::filesystem::path& msi_path, const MsiInstallOptions& options) const override {
         ++install_calls;
         last_msi_path = msi_path;
         last_options = options;
+        if (on_install) {
+            on_install();
+        }
         return result;
     }
 };
@@ -163,6 +167,9 @@ private slots:
         github.sums_text = hash + "  hitokoto-0.6.2-x64.msi\n";
 
         FakeMsiInstaller installer;
+        installer.on_install = [&locator] {
+            locator.installed = InstalledHitokoto{Version{0, 6, 2}, InstallScope::Machine, ""};
+        };
         std::ostringstream out;
         std::ostringstream err;
         updater::cli::RunnerDeps deps{
@@ -182,7 +189,39 @@ private slots:
         QCOMPARE(installer.install_calls, 1);
         QCOMPARE(installer.last_options.scope, InstallScope::Machine);
         QVERIFY(installer.last_options.is_upgrade);
+        QVERIFY(installer.last_options.accept_license);
+        QVERIFY(out.str().find("installed successfully") != std::string::npos);
         QVERIFY(!std::filesystem::exists(installer.last_msi_path));
+    }
+
+    void installer_exit_success_without_updated_version_is_reported_as_failure() {
+        FakeLocator locator;
+        locator.installed = InstalledHitokoto{Version{0, 6, 1}, InstallScope::User, ""};
+
+        FakeGitHubClient github;
+        const std::string hash = updater::core::sha256_hex(github.msi_payload);
+        github.release_json = make_release_json("0.6.2", hash);
+        github.sums_text = hash + "  hitokoto-0.6.2-x64.msi\n";
+
+        FakeMsiInstaller installer;
+        std::ostringstream out;
+        std::ostringstream err;
+        updater::cli::RunnerDeps deps{
+            .locator = locator,
+            .github = github,
+            .installer = installer,
+            .out = out,
+            .err = err,
+            .confirm = [](const std::string&) { return true; },
+            .app_version = "0.1.0",
+            .temp_root = std::filesystem::temp_directory_path(),
+        };
+
+        const int code = updater::cli::run_cli(CliOptions{}, deps);
+        QCOMPARE(code, 1);
+        QCOMPARE(installer.install_calls, 1);
+        QVERIFY(err.str().find("0.6.2") != std::string::npos);
+        QVERIFY(out.str().find("installed successfully") == std::string::npos);
     }
 
     void checksum_mismatch_aborts_install_and_cleans_up() {
@@ -225,6 +264,9 @@ private slots:
         github.sums_text = hash + "  hitokoto-0.6.2-x64.msi\n";
 
         FakeMsiInstaller installer;
+        installer.on_install = [&locator] {
+            locator.installed = InstalledHitokoto{Version{0, 6, 2}, InstallScope::User, ""};
+        };
         std::ostringstream out;
         std::ostringstream err;
         updater::cli::RunnerDeps deps{
