@@ -207,7 +207,7 @@ int run_cli(const core::CliOptions& options, RunnerDeps& deps) {
     }
     const core::MsiInstallOptions install_opts{
         .silent = options.silent,
-        .accept_license = !is_upgrade || options.yes,
+        .accept_license = true,
         .is_upgrade = is_upgrade,
         .scope = scope,
     };
@@ -225,10 +225,23 @@ int run_cli(const core::CliOptions& options, RunnerDeps& deps) {
         return 1;
     }
 
+    const auto installed_after = deps.locator.find_installed();
+    if (!installed_after.has_value() || installed_after->version < release.version) {
+        deps.err << "Installation verification failed: expected hitokoto " << core::to_string(release.version)
+                 << " or newer, but ";
+        if (installed_after.has_value()) {
+            deps.err << "version " << core::to_string(installed_after->version) << " is still installed.\n";
+        } else {
+            deps.err << "hitokoto was not detected as installed.\n";
+        }
+        return 1;
+    }
+
     deps.out << "hitokoto " << core::to_string(release.version) << " installed successfully.\n";
     if (install_res.exit_code == 3010) {
         deps.out << "A system restart is required to complete the installation.\n";
     }
+
     return 0;
 }
 
